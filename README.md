@@ -1,7 +1,5 @@
 # telegram-media-downloader-bot
 
-发文件给 Bot 然后自动下载，特么这么简单的事情我翻遍整个 GitHub 都没几个能用的，我请问呢？？？
-
 Bot API 默认限制大小 20M, 如果想要突破限制请使用 [tgbotapi](https://tdlib.github.io/telegram-bot-api/build.html) 搭配 `-api` 使用。
 
 ```
