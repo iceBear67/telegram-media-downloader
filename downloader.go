@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"errors"
 	"flag"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 
 	"github.com/avast/retry-go"
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
@@ -116,31 +118,43 @@ func handlePhoto(update tgbotapi.Update) {
 	if photo == nil {
 		return
 	}
-	for i := range photo {
-		p := photo[i]
-		go handleFile(update, MediaFile{
-			p.FileID,
-			p.FileUniqueID,
-		})
-	}
+	p := slices.MaxFunc(photo, func(a, b tgbotapi.PhotoSize) int {
+		return cmp.Compare(b.FileSize, a.FileSize)
+	})
+	go handleFile(update, MediaFile{
+		update.Message.Time().String(),
+		p.FileID,
+	})
 }
+
+var downloading int32 = 0
 
 func handleFile(update tgbotapi.Update, media MediaFile) {
 	mediaFileName := media.FileName
+	if mediaFileName == "" {
+		mediaFileName = media.FileID
+	}
 	forwardFrom := update.Message.ForwardFromChat
 	if forwardFrom != nil {
 		mediaFileName = fmt.Sprintf("%v %v - %v", forwardFrom.FirstName, forwardFrom.LastName, mediaFileName)
 	}
 	log.Printf("(%v) Found new media: %v, sent from %v", media.FileID, mediaFileName, update.FromChat().UserName)
+	filePath := path.Join(*savePath, mediaFileName)
+	atomic.AddInt32(&downloading, 1)
+	defer atomic.AddInt32(&downloading, -1)
+	if f, err := os.Stat(filePath); err == nil {
+		sendMessage(update.Message.Chat.ID, fmt.Sprintf("%v already downloaded! (size: %v)", mediaFileName, f.Size()))
+		return
+	}
+	go bot.Send(tgbotapi.NewMessage(update.Message.Chat.ID, fmt.Sprintf("Enqueued %v. %v are downloading now", mediaFileName, downloading)))
 	url, err := bot.GetFileDirectURL(media.FileID)
 	if err != nil {
 		sendMessage(update.Message.Chat.ID, fmt.Sprintf("(%v) Failed to fetch direct url of %v, err: %v", media.FileID, mediaFileName, err))
 		return
 	}
 	log.Println("Resolved url for ", media.FileID, " is: ", url)
-	go bot.Send(tgbotapi.NewMessage(update.Message.Chat.ID, fmt.Sprintf("Enqueued %v. %v are downloading now", mediaFileName, len(concurrentSignal))))
 	if localApiFileURLRegex == nil {
-		downloadTask(mediaFileName, url, update.Message.Chat.ID)
+		downloadTask(mediaFileName, url, filePath, update.Message.Chat.ID)
 		return
 	}
 	matches := localApiFileURLRegex.FindStringSubmatch(url)
@@ -156,9 +170,12 @@ func handleFile(update tgbotapi.Update, media MediaFile) {
 	sendMessage(update.Message.Chat.ID, fmt.Sprintf("%v is saved successfully", mediaFileName))
 }
 
-func downloadTask(name string, url string, chatId int64) {
+func downloadTask(name string, url string, filePath string, chatId int64) {
 	concurrentSignal <- struct{}{}
 	defer func() { <-concurrentSignal }()
+	if _, err := os.Stat(filePath); err == nil {
+		return
+	}
 	attempt := 0
 	_ = retry.Do(func() error {
 		resp, err := client.Get(url)
@@ -168,7 +185,6 @@ func downloadTask(name string, url string, chatId int64) {
 		if resp.StatusCode >= 400 {
 			return errors.New(resp.Status)
 		}
-		filePath := path.Join(*savePath, name)
 		file, err := os.Create(filePath)
 		if err != nil {
 			return err
