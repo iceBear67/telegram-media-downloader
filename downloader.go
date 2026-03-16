@@ -156,6 +156,13 @@ func handleFile(update tgbotapi.Update, media MediaFile) {
 		return
 	}
 	log.Println("Moving from", matches[1], "to", path.Join(*savePath, mediaFileName))
+	if src, err := os.Open(matches[1]); err == nil {
+		if dst, err := os.Create(path.Join(*savePath, mediaFileName)); err == nil {
+			_, err = src.WriteTo(dst)
+			_ = dst.Close()
+		}
+		_ = src.Close()
+	}
 	err = os.Rename(matches[1], path.Join(*savePath, mediaFileName))
 	if err != nil {
 		sendMessage(update.Message.Chat.ID, fmt.Sprintf("(%v) Cannot move file for %v. err: %v", media.FileID, mediaFileName, err))
