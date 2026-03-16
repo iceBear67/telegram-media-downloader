@@ -29,12 +29,12 @@ var bot *tgbotapi.BotAPI
 var concurrentSignal chan struct{}
 var client *http.Client
 
-var localApiFileURLRegex *regexp.Regexp
-
 type MediaFile struct {
 	FileName string
 	FileID   string
 }
+
+var pathRegex = regexp.MustCompile("https://.+/(/.+$)")
 
 func main() {
 	concurrent := flag.Int("conc", 4, "number of concurrent downloads")
@@ -45,13 +45,6 @@ func main() {
 	client = &http.Client{}
 	if *botToken == "" || *apiEndpoint == "" {
 		panic("Invalid botToken or apiEndpoint.")
-	}
-	if *localApi {
-		regex := strings.ReplaceAll(tgbotapi.FileEndpoint, ".", "\\.")
-		regex = strings.ReplaceAll(tgbotapi.FileEndpoint, "/", "\\/")
-		regex = strings.Replace(regex, "%s", "([a-zA-Z:0-9_]+)?", 1)
-		regex = strings.Replace(regex, "%s", "(.*)", 1)
-		localApiFileURLRegex = regexp.MustCompile(regex)
 	}
 	permittedUsers := strings.Split(*_permittedUsers, ",")
 	if *_permittedUsers == "" {
@@ -153,16 +146,16 @@ func handleFile(update tgbotapi.Update, media MediaFile) {
 		return
 	}
 	log.Println("Resolved url for ", media.FileID, " is: ", url)
-	if localApiFileURLRegex == nil {
+	if localApi == nil {
 		downloadTask(mediaFileName, url, filePath, update.Message.Chat.ID)
 		return
 	}
-	matches := localApiFileURLRegex.FindStringSubmatch(url)
-	if matches == nil || len(matches) != 3 {
+	matches := pathRegex.FindStringSubmatch(url)
+	if matches == nil || len(matches) != 2 {
 		sendMessage(update.Message.Chat.ID, fmt.Sprintf("(%v) Cannot resolve local url %v", media.FileID, mediaFileName))
 		return
 	}
-	err = os.Rename(matches[2], path.Join(*savePath, mediaFileName))
+	err = os.Rename(matches[1], path.Join(*savePath, mediaFileName))
 	if err != nil {
 		sendMessage(update.Message.Chat.ID, fmt.Sprintf("(%v) Cannot move file for %v", media.FileID, mediaFileName))
 		return
