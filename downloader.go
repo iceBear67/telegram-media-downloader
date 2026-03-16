@@ -158,7 +158,7 @@ func handleFile(update tgbotapi.Update, media MediaFile) {
 	log.Println("Moving from", matches[1], "to", path.Join(*savePath, mediaFileName))
 	err = os.Rename(matches[1], path.Join(*savePath, mediaFileName))
 	if err != nil {
-		sendMessage(update.Message.Chat.ID, fmt.Sprintf("(%v) Cannot move file for %v", media.FileID, mediaFileName))
+		sendMessage(update.Message.Chat.ID, fmt.Sprintf("(%v) Cannot move file for %v. err: %v", media.FileID, mediaFileName, err))
 		return
 	}
 	sendMessage(update.Message.Chat.ID, fmt.Sprintf("%v is saved successfully", mediaFileName))
