@@ -155,6 +155,7 @@ func handleFile(update tgbotapi.Update, media MediaFile) {
 		sendMessage(update.Message.Chat.ID, fmt.Sprintf("(%v) Cannot resolve local url %v", media.FileID, mediaFileName))
 		return
 	}
+	log.Println("Moving from", matches[1], "to", path.Join(*savePath, mediaFileName))
 	err = os.Rename(matches[1], path.Join(*savePath, mediaFileName))
 	if err != nil {
 		sendMessage(update.Message.Chat.ID, fmt.Sprintf("(%v) Cannot move file for %v", media.FileID, mediaFileName))
