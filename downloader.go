@@ -132,7 +132,7 @@ func handleFile(update tgbotapi.Update, media MediaFile) {
 		mediaFileName = fmt.Sprintf("%v %v - %v", forwardFrom.FirstName, forwardFrom.LastName, mediaFileName)
 	}
 	log.Printf("(%v) Found new media: %v, sent from %v", media.FileID, mediaFileName, update.FromChat().UserName)
-	filePath := path.Join(*savePath, mediaFileName)
+	filePath := path.Join(*savePath, media.FileID+"."+mediaFileName)
 	atomic.AddInt32(&downloading, 1)
 	defer atomic.AddInt32(&downloading, -1)
 	if f, err := os.Stat(filePath); err == nil {
@@ -155,9 +155,9 @@ func handleFile(update tgbotapi.Update, media MediaFile) {
 		sendMessage(update.Message.Chat.ID, fmt.Sprintf("(%v) Cannot resolve local url %v", media.FileID, mediaFileName))
 		return
 	}
-	log.Println("Moving from", matches[1], "to", path.Join(*savePath, mediaFileName))
+	log.Println("Moving from", matches[1], "to", filePath)
 	if src, err := os.Open(matches[1]); err == nil {
-		if dst, err := os.Create(path.Join(*savePath, mediaFileName)); err == nil {
+		if dst, err := os.Create(filePath); err == nil {
 			_, err = src.WriteTo(dst)
 			_ = dst.Close()
 		}
