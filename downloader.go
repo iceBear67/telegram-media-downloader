@@ -55,6 +55,7 @@ func main() {
 	defer cancel()
 
 	b, err := bot.New(*botToken, bot.WithServerURL(*apiEndpoint),
+		bot.WithSkipGetMe(),
 		bot.WithDefaultHandler(func(ctx context.Context, b *bot.Bot, update *models.Update) {
 			if update.Message == nil {
 				return
