@@ -2,6 +2,7 @@ package main
 
 import (
 	"cmp"
+	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -9,23 +10,25 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"path"
 	"regexp"
 	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/avast/retry-go"
-	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+	"github.com/go-telegram/bot"
+	"github.com/go-telegram/bot/models"
 )
 
 var botToken = flag.String("token", "", "telegram bot token.")
-var apiEndpoint = flag.String("api", tgbotapi.APIEndpoint, "baseUrl of telegram bot api")
+var apiEndpoint = flag.String("api", "https://api.telegram.org", "baseUrl of telegram bot api")
 var savePath = flag.String("output", "./downloads", "save path for files")
 var retryAttempts = flag.Int("attempts", 10, "number of attempts to download files")
 var localApi = flag.Bool("use_local", false, "set this to true if you're using local bot api")
-var bot *tgbotapi.BotAPI
 var concurrentSignal chan struct{}
 var client *http.Client
 
@@ -51,126 +54,148 @@ func main() {
 		log.Println("WARNING: Sudoers are not set. Everyone can request your bot to download sth.")
 	}
 
-	_bot, err := tgbotapi.NewBotAPIWithAPIEndpoint(*botToken, *apiEndpoint)
-	bot = _bot
-	if err != nil {
-		log.Panic(err)
-	}
-	log.Printf("Authorized on account %s", bot.Self.UserName)
-	u := tgbotapi.NewUpdate(0)
-	u.Timeout = 60
-	updates := bot.GetUpdatesChan(u)
-	for update := range updates {
-		if update.Message != nil { // If we got a message
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer cancel()
+
+	serverURL := *apiEndpoint + "/bot"
+	b, err := bot.New(*botToken, bot.WithServerURL(serverURL),
+		bot.WithDefaultHandler(func(ctx context.Context, b *bot.Bot, update *models.Update) {
+			if update.Message == nil {
+				return
+			}
 			id := strconv.FormatInt(update.Message.From.ID, 10)
 			if *_permittedUsers != "" {
 				if slices.Index(permittedUsers, id) == -1 {
-					log.Printf("Failed to validate %v: %v", update.Message.From.UserName, id)
-					continue
+					log.Printf("Failed to validate %v: %v", update.Message.From.Username, id)
+					return
 				}
 			}
-			log.Printf("[%s] %s", update.Message.From.UserName, update.Message.Text)
-			handleDocument(update)
-			handleAudio(update)
-			handleVideo(update)
-			handleAudio(update)
-			handlePhoto(update)
-		}
+			log.Printf("[%s] %s", update.Message.From.Username, update.Message.Text)
+			handleDocument(ctx, b, update)
+			handleAudio(ctx, b, update)
+			handleVideo(ctx, b, update)
+			handlePhoto(ctx, b, update)
+		}))
+	if err != nil {
+		log.Panic(err)
 	}
+	log.Printf("Authorized on account %s", b.ID())
+	b.Start(ctx)
 }
 
-func handleDocument(update tgbotapi.Update) {
+func handleDocument(ctx context.Context, b *bot.Bot, update *models.Update) {
 	document := update.Message.Document
 	if document == nil {
 		return
 	}
-	go handleFile(update, MediaFile{FileID: document.FileID, FileName: document.FileName})
+	go handleFile(ctx, b, update, MediaFile{FileID: document.FileID, FileName: document.FileName})
 }
 
-func handleAudio(update tgbotapi.Update) {
+func handleAudio(ctx context.Context, b *bot.Bot, update *models.Update) {
 	audio := update.Message.Audio
 	if audio == nil {
 		return
 	}
-	go handleFile(update, MediaFile{FileID: audio.FileID, FileName: audio.FileName})
+	go handleFile(ctx, b, update, MediaFile{FileID: audio.FileID, FileName: audio.FileName})
 }
 
-func handleVideo(update tgbotapi.Update) {
+func handleVideo(ctx context.Context, b *bot.Bot, update *models.Update) {
 	video := update.Message.Video
 	if video == nil {
 		return
 	}
-	go handleFile(update, MediaFile{
-		FileID:   video.FileID,
+	var best *models.VideoQuality = nil
+	for _, quality := range video.Qualities {
+		if best == nil {
+			best = &quality
+			continue
+		}
+		if quality.FileSize > best.FileSize {
+			best = &quality
+		}
+	}
+	fileId := video.FileID
+	if best != nil {
+		fileId = best.FileID
+	}
+	go handleFile(ctx, b, update, MediaFile{
+		FileID:   fileId,
 		FileName: video.FileName,
 	})
 }
 
-func handlePhoto(update tgbotapi.Update) {
+func handlePhoto(ctx context.Context, b *bot.Bot, update *models.Update) {
 	photo := update.Message.Photo
 	if photo == nil {
 		return
 	}
-	p := slices.MaxFunc(photo, func(a, b tgbotapi.PhotoSize) int {
+	p := slices.MaxFunc(photo, func(a, b models.PhotoSize) int {
 		return cmp.Compare(b.FileSize, a.FileSize)
 	})
-	go handleFile(update, MediaFile{
-		update.Message.Time().String(),
+	go handleFile(ctx, b, update, MediaFile{
+		time.Unix(int64(update.Message.Date), 0).String(),
 		p.FileID,
 	})
 }
 
 var downloading int32 = 0
 
-func handleFile(update tgbotapi.Update, media MediaFile) {
+func handleFile(ctx context.Context, b *bot.Bot, update *models.Update, media MediaFile) {
 	mediaFileName := media.FileName
 	if mediaFileName == "" {
 		mediaFileName = media.FileID
 	}
-	forwardFrom := update.Message.ForwardFromChat
-	if forwardFrom != nil {
-		mediaFileName = fmt.Sprintf("%v %v - %v", forwardFrom.FirstName, forwardFrom.LastName, mediaFileName)
+	if update.Message.ForwardOrigin != nil {
+		if origin := update.Message.ForwardOrigin.MessageOriginChat; origin != nil {
+			mediaFileName = fmt.Sprintf("%v %v - %v", origin.SenderChat.FirstName, origin.SenderChat.LastName, mediaFileName)
+		}
 	}
-	log.Printf("(%v) Found new media: %v, sent from %v", media.FileID, mediaFileName, update.FromChat().UserName)
+	log.Printf("(%v) Found new media: %v, sent from %v", media.FileID, mediaFileName, update.Message.Chat.Username)
 	filePath := path.Join(*savePath, media.FileID+"."+mediaFileName)
 	atomic.AddInt32(&downloading, 1)
 	defer atomic.AddInt32(&downloading, -1)
 	if f, err := os.Stat(filePath); err == nil {
-		sendMessage(update.Message.Chat.ID, fmt.Sprintf("%v already downloaded! (size: %v)", mediaFileName, f.Size()))
+		sendMessage(ctx, b, update.Message.Chat.ID, fmt.Sprintf("%v already downloaded! (size: %v)", mediaFileName, f.Size()))
 		return
 	}
-	go bot.Send(tgbotapi.NewMessage(update.Message.Chat.ID, fmt.Sprintf("Enqueued %v. %v are downloading now", mediaFileName, downloading)))
-	url, err := bot.GetFileDirectURL(media.FileID)
+	b.SendMessage(ctx, &bot.SendMessageParams{
+		ChatID: update.Message.Chat.ID,
+		Text:   fmt.Sprintf("Enqueued %v. %v are downloading now", mediaFileName, downloading),
+	})
+
+	file, err := b.GetFile(ctx, &bot.GetFileParams{FileID: media.FileID})
 	if err != nil {
-		sendMessage(update.Message.Chat.ID, fmt.Sprintf("(%v) Failed to fetch direct url of %v, err: %v", media.FileID, mediaFileName, err))
+		sendMessage(ctx, b, update.Message.Chat.ID, fmt.Sprintf("(%v) Failed to fetch direct url of %v, err: %v", media.FileID, mediaFileName, err))
 		return
 	}
+	url := b.FileDownloadLink(file)
 	log.Println("Resolved url for ", media.FileID, " is: ", url)
-	if localApi == nil {
-		downloadTask(mediaFileName, url, filePath, update.Message.Chat.ID)
+	if !*localApi {
+		downloadTask(ctx, b, mediaFileName, url, filePath, update.Message.Chat.ID)
 		return
 	}
 	matches := pathRegex.FindStringSubmatch(url)
 	if matches == nil || len(matches) != 2 {
-		sendMessage(update.Message.Chat.ID, fmt.Sprintf("(%v) Cannot resolve local url %v", media.FileID, mediaFileName))
+		sendMessage(ctx, b, update.Message.Chat.ID, fmt.Sprintf("(%v) Cannot resolve local url %v", media.FileID, mediaFileName))
 		return
 	}
 	log.Println("Moving from", matches[1], "to", filePath)
+	var copyErr error
 	if src, err := os.Open(matches[1]); err == nil {
 		if dst, err := os.Create(filePath); err == nil {
-			_, err = src.WriteTo(dst)
+			_, copyErr = src.WriteTo(dst)
 			_ = dst.Close()
 		}
 		_ = src.Close()
 	}
-	if err != nil {
-		sendMessage(update.Message.Chat.ID, fmt.Sprintf("(%v) Cannot move file for %v. err: %v", media.FileID, mediaFileName, err))
+	if copyErr != nil {
+		sendMessage(ctx, b, update.Message.Chat.ID, fmt.Sprintf("(%v) Cannot move file for %v. err: %v", media.FileID, mediaFileName, copyErr))
 		return
 	}
-	sendMessage(update.Message.Chat.ID, fmt.Sprintf("%v is saved successfully", mediaFileName))
+	sendMessage(ctx, b, update.Message.Chat.ID, fmt.Sprintf("%v is saved successfully", mediaFileName))
 }
 
-func downloadTask(name string, url string, filePath string, chatId int64) {
+func downloadTask(ctx context.Context, b *bot.Bot, name string, url string, filePath string, chatId int64) {
 	concurrentSignal <- struct{}{}
 	defer func() { <-concurrentSignal }()
 	if _, err := os.Stat(filePath); err == nil {
@@ -193,11 +218,11 @@ func downloadTask(name string, url string, filePath string, chatId int64) {
 		if err != nil {
 			return err
 		}
-		sendMessage(chatId, fmt.Sprintf("%v has been downloaded! (%vB)", name, written))
+		sendMessage(ctx, b, chatId, fmt.Sprintf("%v has been downloaded! (%vB)", name, written))
 		return nil
 	}, retry.RetryIf(func(err error) bool {
 		if attempt > *retryAttempts {
-			sendMessage(chatId, fmt.Sprintf("Failed to download %v, err: %v", name, err))
+			sendMessage(ctx, b, chatId, fmt.Sprintf("Failed to download %v, err: %v", name, err))
 			return false
 		}
 		log.Printf("Attempt %v failed, retrying. Error: %v", attempt, err)
@@ -206,8 +231,10 @@ func downloadTask(name string, url string, filePath string, chatId int64) {
 	}))
 }
 
-func sendMessage(chat int64, text string) {
+func sendMessage(ctx context.Context, b *bot.Bot, chat int64, text string) {
 	log.Printf("(-> %v) %v", chat, text)
-	msg := tgbotapi.NewMessage(chat, text)
-	go bot.Send(msg)
+	b.SendMessage(ctx, &bot.SendMessageParams{
+		ChatID: chat,
+		Text:   text,
+	})
 }
