@@ -12,7 +12,6 @@ import (
 	"os"
 	"os/signal"
 	"path"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -37,8 +36,6 @@ type MediaFile struct {
 	FileID   string
 }
 
-var pathRegex = regexp.MustCompile("https://.+/(/.+$)")
-
 func main() {
 	concurrent := flag.Int("conc", 4, "number of concurrent downloads")
 	_permittedUsers := flag.String("sudoers", "", "permitted users. Split by ,")
@@ -57,8 +54,7 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
 
-	serverURL := *apiEndpoint + "/bot"
-	b, err := bot.New(*botToken, bot.WithServerURL(serverURL),
+	b, err := bot.New(*botToken, bot.WithServerURL(*apiEndpoint),
 		bot.WithDefaultHandler(func(ctx context.Context, b *bot.Bot, update *models.Update) {
 			if update.Message == nil {
 				return
@@ -79,7 +75,7 @@ func main() {
 	if err != nil {
 		log.Panic(err)
 	}
-	log.Printf("Authorized on account %s", b.ID())
+	log.Printf("Authorized on account %d", b.ID())
 	b.Start(ctx)
 }
 
@@ -174,14 +170,9 @@ func handleFile(ctx context.Context, b *bot.Bot, update *models.Update, media Me
 		downloadTask(ctx, b, mediaFileName, url, filePath, update.Message.Chat.ID)
 		return
 	}
-	matches := pathRegex.FindStringSubmatch(url)
-	if matches == nil || len(matches) != 2 {
-		sendMessage(ctx, b, update.Message.Chat.ID, fmt.Sprintf("(%v) Cannot resolve local url %v", media.FileID, mediaFileName))
-		return
-	}
-	log.Println("Moving from", matches[1], "to", filePath)
+	log.Println("Moving from", file.FilePath, "to", filePath)
 	var copyErr error
-	if src, err := os.Open(matches[1]); err == nil {
+	if src, err := os.Open(file.FilePath); err == nil {
 		if dst, err := os.Create(filePath); err == nil {
 			_, copyErr = src.WriteTo(dst)
 			_ = dst.Close()
